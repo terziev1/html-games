@@ -1,0 +1,664 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Chop the Tree</title>
+<style>
+  :root { --calm: #cdded9; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--calm);
+    font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  canvas { display: block; touch-action: none; }
+
+  /* quiet on-screen hint — fades away the first time anything is pressed */
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 7%; text-align: center;
+    color: #4a5a52; font-size: clamp(15px, 2.4vw, 22px); font-weight: 600;
+    letter-spacing: .2px; pointer-events: none; user-select: none;
+    transition: opacity .6s ease; text-shadow: 0 1px 0 rgba(255,255,255,.45);
+  }
+
+  /* small, unobtrusive sound toggle for the grown-up */
+  #mute {
+    position: fixed; top: 14px; right: 14px; width: 44px; height: 44px;
+    border: none; border-radius: 50%; cursor: pointer; font-size: 20px; line-height: 44px;
+    background: rgba(255,255,255,.55); color: #41514a; backdrop-filter: blur(4px);
+    box-shadow: 0 1px 4px rgba(40,60,50,.18); transition: background .2s ease, transform .1s ease;
+  }
+  #mute:hover { background: rgba(255,255,255,.8); }
+  #mute:active { transform: scale(.94); }
+  #mute:focus-visible { outline: 2px solid #6f8b6e; outline-offset: 2px; }
+</style>
+
+<button id="mute" aria-label="Sound on or off" title="Sound on / off">🔊</button>
+<div id="hint">Tap the screen or press any key to cut 🪵</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.4.2/pixi.min.js"></script>
+<script>
+/* ============================================================================
+   Chop the Tree — a calm, low-stimulation button-masher.
+   Press any key or tap anywhere: the chainsaw bites into the trunk. After a
+   random 10–20 cuts the tree gently topples, then quietly resets.
+
+   Everything you might want to tweak lives in CONFIG just below.
+   The tree/chainsaw are drawn with code + a generated wood texture; see the
+   notes near the bottom for how to drop in real PNG photos instead.
+============================================================================ */
+
+const CONFIG = {
+  cutsMin: 10,            // fewest cuts before the tree falls
+  cutsMax: 20,            // most cuts before the tree falls
+  cooldownMs: 150,        // min time between accepted presses (keeps pace calm)
+
+  fallMs: 2300,           // how long the topple takes (bigger = slower / calmer)
+  fallAngle: Math.PI * 0.52,
+  restMs: 1000,           // pause lying on the ground before reset
+  fadeMs: 550,            // gentle fade-out / fade-in on reset
+
+  // muted, low-stimulation palette
+  skyTop:   0xbfd2d6,
+  skyBot:   0xe2e8df,
+  ground:   0xa3b189,
+  groundLip:0x8d9d74,
+  barkBase: 0x6f5238,
+  barkDark: 0x563f2a,
+  barkLite: 0x80623f,
+  cutLite:  0xd9c197,     // fresh-cut wood (notch face)
+  cutDark:  0xbda478,
+  cutEdge:  0x8a6f47,
+  leaf:    [0x7e9a6b, 0x88a274, 0x6f8b5e, 0x95a87f],
+  sawBody:  0xc06a34,     // softened safety-orange
+  sawBodyD: 0x9d5328,
+  sawHandle:0x3b3a37,
+  bar:      0xc2c6c6,
+  barEdge:  0x8f9395,
+  chain:    0x6c7173,
+  dust:    [0xd9c29a, 0xc7ad84, 0xbfa477],
+  shadow:   0x35402f,
+
+  audio: { master: 0.8, idle: 0.03, cut: 0.13, thud: 0.18 },
+};
+
+/* ----------------------------------------------------------------------- */
+/* tiny colour helper                                                      */
+function shade(hex, amt) {
+  let r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+  r = Math.max(0, Math.min(255, r + amt));
+  g = Math.max(0, Math.min(255, g + amt));
+  b = Math.max(0, Math.min(255, b + amt));
+  return (r << 16) | (g << 8) | b;
+}
+function css(hex) { return "#" + hex.toString(16).padStart(6, "0"); }
+
+/* ----------------------------------------------------------------------- */
+/* generated textures (canvas → Pixi texture)                              */
+
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 2; c.height = 256;
+  const x = c.getContext("2d");
+  const g = x.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, css(CONFIG.skyTop));
+  g.addColorStop(1, css(CONFIG.skyBot));
+  x.fillStyle = g; x.fillRect(0, 0, 2, 256);
+  return PIXI.Texture.from(c);
+}
+
+function makeBarkTexture() {
+  const w = 96, h = 160;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const x = c.getContext("2d");
+  // base, faintly lighter in the centre to read as a round trunk
+  const g = x.createLinearGradient(0, 0, w, 0);
+  g.addColorStop(0,   css(CONFIG.barkDark));
+  g.addColorStop(0.5, css(shade(CONFIG.barkBase, 8)));
+  g.addColorStop(1,   css(shade(CONFIG.barkDark, 4)));
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+  // soft vertical grain — many faint streaks, low contrast (calm)
+  for (let i = 0; i < 60; i++) {
+    const gx = Math.random() * w;
+    const dark = Math.random() < 0.5;
+    x.strokeStyle = dark ? css(CONFIG.barkDark) : css(CONFIG.barkLite);
+    x.globalAlpha = 0.06 + Math.random() * 0.12;
+    x.lineWidth = 0.6 + Math.random() * 1.8;
+    x.beginPath();
+    let gy = 0; x.moveTo(gx, 0);
+    while (gy < h) { gy += 12 + Math.random() * 16; x.lineTo(gx + (Math.random() * 4 - 2), gy); }
+    x.stroke();
+  }
+  // a couple of subtle knots
+  x.globalAlpha = 0.14;
+  for (let i = 0; i < 2; i++) {
+    const kx = 12 + Math.random() * (w - 24), ky = 20 + Math.random() * (h - 40);
+    const rg = x.createRadialGradient(kx, ky, 1, kx, ky, 9);
+    rg.addColorStop(0, css(CONFIG.barkDark));
+    rg.addColorStop(1, "rgba(0,0,0,0)");
+    x.fillStyle = rg; x.beginPath(); x.arc(kx, ky, 9, 0, Math.PI * 2); x.fill();
+  }
+  x.globalAlpha = 1;
+  const tex = PIXI.Texture.from(c);
+  tex.baseTexture.wrapMode = PIXI.WRAP_MODES.REPEAT;
+  return tex;
+}
+
+function makeChainTexture() {
+  // a short repeating strip of chain links / teeth, low contrast
+  const w = 18, h = 8;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const x = c.getContext("2d");
+  x.fillStyle = css(CONFIG.chain);
+  x.fillRect(0, 2, w, 4);                 // the band
+  x.fillStyle = css(shade(CONFIG.chain, 26));
+  x.fillRect(2, 0, 5, 3);                 // a tooth on top
+  x.fillStyle = css(shade(CONFIG.chain, -22));
+  x.fillRect(10, 5, 5, 3);                // a drive link below
+  const tex = PIXI.Texture.from(c);
+  tex.baseTexture.wrapMode = PIXI.WRAP_MODES.REPEAT;
+  return tex;
+}
+
+/* ----------------------------------------------------------------------- */
+/* gentle synthesised sound (Web Audio — no files needed)                  */
+
+class SawAudio {
+  constructor() { this.ctx = null; this.muted = false; this.idleOn = false; }
+  ensure() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = this.muted ? 0 : CONFIG.audio.master;
+      this.master.connect(this.ctx.destination);
+      const len = this.ctx.sampleRate;
+      this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const d = this.noise.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (this.ctx.state === "suspended") this.ctx.resume();
+  }
+  startIdle() {
+    this.ensure();
+    if (this.idleOn) return; this.idleOn = true;
+    const t = this.ctx.currentTime;
+    this.lp = this.ctx.createBiquadFilter(); this.lp.type = "lowpass"; this.lp.frequency.value = 520;
+    this.idleGain = this.ctx.createGain(); this.idleGain.gain.value = 0;
+    this.o1 = this.ctx.createOscillator(); this.o1.type = "sawtooth"; this.o1.frequency.value = 90;
+    this.o2 = this.ctx.createOscillator(); this.o2.type = "sawtooth"; this.o2.frequency.value = 91; this.o2.detune.value = 7;
+    this.lfo = this.ctx.createOscillator(); this.lfo.type = "sine"; this.lfo.frequency.value = 7;   // soft "putt-putt"
+    this.lfoGain = this.ctx.createGain(); this.lfoGain.gain.value = 0.01;
+    this.o1.connect(this.lp); this.o2.connect(this.lp); this.lp.connect(this.idleGain); this.idleGain.connect(this.master);
+    this.lfo.connect(this.lfoGain); this.lfoGain.connect(this.idleGain.gain);
+    this.o1.start(); this.o2.start(); this.lfo.start();
+    this.idleGain.gain.setValueAtTime(0, t);
+    this.idleGain.gain.linearRampToValueAtTime(CONFIG.audio.idle, t + 0.4);
+  }
+  cut() {
+    this.ensure();
+    const t = this.ctx.currentTime;
+    // wood-bite: a short band-passed noise chirp that drops in pitch
+    const src = this.ctx.createBufferSource(); src.buffer = this.noise; src.loop = true;
+    const bp = this.ctx.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 2.5;
+    bp.frequency.setValueAtTime(900, t);
+    bp.frequency.exponentialRampToValueAtTime(360, t + 0.22);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(CONFIG.audio.cut, t + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0008, t + 0.26);
+    src.connect(bp); bp.connect(g); g.connect(this.master);
+    src.start(t); src.stop(t + 0.3);
+    // brief engine rev so each press feels like a bite
+    if (this.idleOn) {
+      [this.o1, this.o2].forEach((o, i) => {
+        const base = 90 + i;
+        o.frequency.cancelScheduledValues(t);
+        o.frequency.setValueAtTime(base, t);
+        o.frequency.linearRampToValueAtTime(150, t + 0.05);
+        o.frequency.linearRampToValueAtTime(base, t + 0.32);
+      });
+      this.idleGain.gain.cancelScheduledValues(t);
+      this.idleGain.gain.setValueAtTime(CONFIG.audio.idle, t);
+      this.idleGain.gain.linearRampToValueAtTime(CONFIG.audio.idle * 1.7, t + 0.05);
+      this.idleGain.gain.linearRampToValueAtTime(CONFIG.audio.idle, t + 0.34);
+    }
+  }
+  thud() {
+    this.ensure();
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(); o.type = "sine";
+    o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(46, t + 0.3);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(CONFIG.audio.thud, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0007, t + 0.5);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.55);
+    // soft leafy rustle
+    const src = this.ctx.createBufferSource(); src.buffer = this.noise; src.loop = true;
+    const bp = this.ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 2600; bp.Q.value = 0.7;
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.exponentialRampToValueAtTime(0.05, t + 0.05);
+    ng.gain.exponentialRampToValueAtTime(0.0006, t + 0.6);
+    src.connect(bp); bp.connect(ng); ng.connect(this.master); src.start(t); src.stop(t + 0.65);
+  }
+  setMuted(m) {
+    this.muted = m;
+    if (this.ctx) this.master.gain.setTargetAtTime(m ? 0 : CONFIG.audio.master, this.ctx.currentTime, 0.02);
+  }
+}
+const audio = new SawAudio();
+
+/* ----------------------------------------------------------------------- */
+/* set up Pixi                                                             */
+
+const app = new PIXI.Application({
+  resizeTo: window,
+  antialias: true,
+  backgroundAlpha: 0,
+  resolution: Math.min(window.devicePixelRatio || 1, 2),
+  autoDensity: true,
+});
+document.body.appendChild(app.view);
+
+const skyTex   = makeSkyTexture();
+const barkTex  = makeBarkTexture();
+const chainTex = makeChainTexture();
+
+// layers
+const PILE_MAX = 15;                    // a full triangular woodpile (5+4+3+2+1)
+
+const sky    = new PIXI.Sprite(skyTex);
+const ground = new PIXI.Graphics();
+const shadow = new PIXI.Graphics();
+const pile   = new PIXI.Graphics();    // background woodpile (drawn behind tree)
+const tree   = new PIXI.Container();   // pivots at its base, so it can topple
+const effects = new PIXI.Container();  // sawdust (does not rotate)
+app.stage.addChild(sky, ground, shadow, pile, tree);
+
+// --- tree internals (local space: base at 0,0; "up" is negative y) -------
+const trunk  = new PIXI.TilingSprite(barkTex, 100, 100);
+const trunkEdge = new PIXI.Graphics();
+const canopy = new PIXI.Graphics();
+const notch  = new PIXI.Graphics();
+tree.addChild(trunk, trunkEdge, canopy, notch);
+
+// --- chainsaw (built once at a reference size, then scaled) --------------
+const REF_BAR = 132;     // reference bar length in local units
+const SWING_MS = 240, SWING_AMP = 0.15;   // each bite rocks the saw through an arc
+const saw = new PIXI.Container();
+let chainTop, chainBot;
+(function buildChainsaw() {
+  const g = new PIXI.Graphics();
+
+  // rear handle loop
+  g.lineStyle(11, CONFIG.sawHandle);
+  g.drawRoundedRect(-108, -40, 56, 80, 16);
+  // top grip
+  g.lineStyle(8, CONFIG.sawHandle);
+  g.moveTo(-58, -34); g.quadraticCurveTo(-30, -62, -2, -38);
+  g.lineStyle(0);
+
+  // engine body
+  g.beginFill(CONFIG.sawBody);
+  g.drawRoundedRect(-92, -32, 100, 64, 18);
+  g.endFill();
+  g.beginFill(CONFIG.sawBodyD);                      // darker underside stripe
+  g.drawRoundedRect(-92, 8, 100, 24, 14);
+  g.endFill();
+  g.beginFill(shade(CONFIG.sawBody, 22), 0.6);       // soft highlight
+  g.drawRoundedRect(-84, -26, 84, 16, 10);
+  g.endFill();
+  g.beginFill(CONFIG.sawHandle);                     // little exhaust
+  g.drawRoundedRect(-96, -6, 10, 16, 3);
+  g.endFill();
+
+  // guide bar
+  g.beginFill(CONFIG.barEdge); g.drawRoundedRect(-8, -11, REF_BAR + 12, 22, 11); g.endFill();
+  g.beginFill(CONFIG.bar);     g.drawRoundedRect(-6, -8,  REF_BAR + 9,  16, 8);  g.endFill();
+  g.beginFill(CONFIG.sawHandle); g.drawCircle(2, 0, 6); g.endFill(); // sprocket bolt
+
+  saw.addChild(g);
+
+  // moving chain — two thin tiling strips that scroll in opposite directions
+  chainTop = new PIXI.TilingSprite(chainTex, REF_BAR + 6, 6); chainTop.position.set(-4, -13);
+  chainBot = new PIXI.TilingSprite(chainTex, REF_BAR + 6, 6); chainBot.position.set(-4, 7);
+  saw.addChild(chainTop, chainBot);
+})();
+app.stage.addChild(saw, effects);
+
+const sawdustGfx = new PIXI.Graphics();
+effects.addChild(sawdustGfx);
+
+/* ----------------------------------------------------------------------- */
+/* state                                                                   */
+
+const S = {
+  // geometry (filled by layout)
+  groundY: 0, treeX: 0, trunkW: 0, trunkH: 0, cutLocalY: 0,
+  trunkLeftX: 0, cutWorldY: 0, maxDepth: 0, sawScale: 1,
+  // play
+  cutsNeeded: rndCuts(), cutsMade: 0, currentDepth: 0, targetDepth: 0,
+  mode: "idle", t: 0, time: 0,
+  running: false, audioStarted: false, lastCut: 0, thudPlayed: false,
+  retract: 0, kick: 0,
+  swingT: 99999, swingDir: 1,     // sawing-swing animation
+  logs: 0, W: 0, H: 0,            // woodpile count + cached screen size
+  dust: [],
+};
+function rndCuts() {
+  return Math.floor(CONFIG.cutsMin + Math.random() * (CONFIG.cutsMax - CONFIG.cutsMin + 1));
+}
+
+/* ----------------------------------------------------------------------- */
+/* layout — recomputed on every resize so it fills any screen              */
+
+function layout() {
+  const W = app.screen.width, H = app.screen.height;
+  S.W = W; S.H = H;
+
+  sky.width = W; sky.height = H;
+
+  const groundTop = H * 0.80;
+  S.groundY = groundTop + Math.min(40, H * 0.04);   // where the trunk meets earth
+  ground.clear();
+  ground.beginFill(CONFIG.groundLip); ground.drawRect(0, groundTop, W, H - groundTop); ground.endFill();
+  ground.beginFill(CONFIG.ground);    ground.drawRect(0, groundTop + 6, W, H - groundTop); ground.endFill();
+
+  // tree sits right-of-centre, leaving the left for the chainsaw
+  S.treeX  = W * 0.6;
+  S.trunkH = Math.min(H * 0.46, 440);
+  S.trunkW = Math.max(46, Math.min(96, S.trunkH * 0.17));
+  S.cutLocalY = -S.trunkH * 0.30;                   // notch height up the trunk (lower = nearer base)
+  S.cutWorldY = S.groundY + S.cutLocalY;
+  S.trunkLeftX = S.treeX - S.trunkW / 2;
+  S.maxDepth = S.trunkW * 0.82;
+  S.sawScale = (S.trunkW * 1.35) / REF_BAR;
+
+  // place the tree container at its base
+  tree.position.set(S.treeX, S.groundY);
+
+  // trunk fill
+  trunk.width = S.trunkW; trunk.height = S.trunkH;
+  trunk.position.set(-S.trunkW / 2, -S.trunkH);
+  // trunk side shading
+  trunkEdge.clear();
+  trunkEdge.beginFill(CONFIG.barkDark, 0.35);
+  trunkEdge.drawRect(S.trunkW / 2 - 6, -S.trunkH, 6, S.trunkH);   // shaded right side
+  trunkEdge.endFill();
+  trunkEdge.beginFill(0xffffff, 0.05);
+  trunkEdge.drawRect(-S.trunkW / 2, -S.trunkH, 5, S.trunkH);      // faint left light
+  trunkEdge.endFill();
+
+  drawCanopy();
+
+  // soft ground shadow
+  shadow.clear();
+  shadow.beginFill(CONFIG.shadow, 0.10);
+  shadow.drawEllipse(S.treeX, S.groundY + 6, S.trunkW * 1.7, S.trunkW * 0.5);
+  shadow.endFill();
+
+  // keep depth consistent with progress after a resize
+  S.targetDepth = (S.cutsMade / S.cutsNeeded) * S.maxDepth;
+
+  drawNotch();
+  drawPile();
+  positionSaw(0);
+}
+
+function drawCanopy() {
+  canopy.clear();
+  const topY = -S.trunkH;
+  const r = S.trunkW * 2.6;
+  // a few overlapping soft blobs, gentle muted greens
+  const blobs = [
+    [0, topY - r * 0.35, r],
+    [-r * 0.7, topY - r * 0.05, r * 0.78],
+    [ r * 0.7, topY - r * 0.05, r * 0.78],
+    [-r * 0.32, topY - r * 0.7, r * 0.72],
+    [ r * 0.34, topY - r * 0.66, r * 0.7],
+  ];
+  blobs.forEach((b, i) => {
+    canopy.beginFill(CONFIG.leaf[i % CONFIG.leaf.length]);
+    canopy.drawCircle(b[0], b[1], b[2]);
+    canopy.endFill();
+  });
+  // a touch of top light
+  canopy.beginFill(0xffffff, 0.06);
+  canopy.drawCircle(-r * 0.2, topY - r * 0.7, r * 0.55);
+  canopy.endFill();
+}
+
+/* draw the felling notch (a wedge of fresh, pale wood) in tree-local space */
+function drawNotch() {
+  const w = S.trunkW, cy = S.cutLocalY, d = S.currentDepth;
+  notch.clear();
+  if (d <= 0.5) return;
+  const grow = S.trunkH * 0.05 + d * 0.42;          // mouth opens wider as it deepens
+  const cap = Math.min(S.trunkH * 0.22, Math.abs(cy) - S.trunkH * 0.06);
+  const mh = Math.min(cap, grow);
+  const top = [-w / 2, cy - mh];
+  const inner = [-w / 2 + d, cy];
+  const bot = [-w / 2, cy + mh];
+
+  // pale wood face
+  notch.beginFill(CONFIG.cutLite);
+  notch.drawPolygon([top[0], top[1], inner[0], inner[1], bot[0], bot[1]]);
+  notch.endFill();
+  // lower face a little darker (light comes from above)
+  notch.beginFill(CONFIG.cutDark, 0.55);
+  notch.drawPolygon([inner[0], inner[1], bot[0], bot[1], -w / 2 + d * 0.25, cy + mh * 0.55]);
+  notch.endFill();
+  // crisp cut edges
+  notch.lineStyle(2, CONFIG.cutEdge, 0.9);
+  notch.moveTo(top[0], top[1]); notch.lineTo(inner[0], inner[1]); notch.lineTo(bot[0], bot[1]);
+}
+
+/* ----------------------------------------------------------------------- */
+/* woodpile in the background — one log added per cut                       */
+
+function pilePositions(n) {
+  const r = S.trunkW * 0.30;
+  const sx = r * 1.85, sy = r * 1.62;
+  const cx = S.W * 0.15, baseY = S.groundY - r;   // back-left, clear of the saw
+  const B = 5;                                    // logs on the bottom row
+  const out = [];
+  let placed = 0, row = 0;
+  while (placed < n && (B - row) > 0) {
+    const count = B - row;
+    const take = Math.min(count, n - placed);
+    const y = baseY - row * sy;
+    const startX = cx - ((count - 1) * sx) / 2;
+    for (let i = 0; i < take; i++) { out.push({ x: startX + i * sx, y, r }); placed++; }
+    row++;
+  }
+  return out;
+}
+
+function drawPile() {
+  pile.clear();
+  const logs = pilePositions(S.logs);
+  if (!logs.length) return;
+  pile.beginFill(CONFIG.shadow, 0.10);           // soft shared ground shadow
+  pile.drawEllipse(S.W * 0.15, S.groundY + 4, S.trunkW * 1.6, S.trunkW * 0.4);
+  pile.endFill();
+  for (const p of logs) {                        // each log seen end-on
+    pile.beginFill(CONFIG.barkBase); pile.drawCircle(p.x, p.y, p.r); pile.endFill();
+    pile.beginFill(CONFIG.cutLite);  pile.drawCircle(p.x, p.y, p.r * 0.78); pile.endFill();
+    pile.lineStyle(1.4, CONFIG.cutEdge, 0.45);
+    pile.drawCircle(p.x, p.y, p.r * 0.50);
+    pile.drawCircle(p.x, p.y, p.r * 0.26);
+    pile.lineStyle(0);
+  }
+}
+
+function addLog() { S.logs = (S.logs >= PILE_MAX) ? 1 : S.logs + 1; drawPile(); }
+
+/* ----------------------------------------------------------------------- */
+/* chainsaw placement                                                      */
+
+function positionSaw(dt) {
+  const tipX = S.trunkLeftX + S.currentDepth;        // bar tip rides the cut
+  let baseX = tipX - REF_BAR * S.sawScale;
+  let baseY = S.cutWorldY;
+
+  // ease the saw clear (up and to the left) while the tree topples
+  baseX -= S.retract * S.trunkW * 1.4;
+  baseY -= S.retract * S.trunkH * 0.14;
+
+  // fine buzz while running; a little more on each bite
+  const buzz = S.running ? 0.5 + S.kick * 1.6 : 0;
+  const vx = (Math.random() * 2 - 1) * buzz;
+  const vy = (Math.random() * 2 - 1) * buzz;
+
+  // swinging/sawing motion: a gentle idle rock plus an arc on each bite,
+  // pivoting near the body so the bar sweeps through the cut (not just forward)
+  let swing = S.running ? Math.sin(S.time * 2.0) * 0.02 : 0;
+  if (S.swingT < SWING_MS) {
+    swing += Math.sin((S.swingT / SWING_MS) * Math.PI) * SWING_AMP * S.swingDir;
+  }
+
+  saw.scale.set(S.sawScale);
+  saw.rotation = swing;
+  saw.position.set(baseX + vx, baseY + vy);
+}
+
+/* ----------------------------------------------------------------------- */
+/* sawdust                                                                 */
+
+function spawnDust() {
+  const x = S.trunkLeftX + S.currentDepth, y = S.cutWorldY;
+  const n = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < n; i++) {
+    S.dust.push({
+      x: x + (Math.random() * 6 - 3),
+      y: y + (Math.random() * 8 - 4),
+      vx: (Math.random() * 2 - 1) * 1.3 - 0.3,
+      vy: -(0.4 + Math.random() * 1.1),
+      life: 600 + Math.random() * 300, max: 900,
+      r: 1.3 + Math.random() * 1.8,
+      c: CONFIG.dust[(Math.random() * CONFIG.dust.length) | 0],
+    });
+  }
+}
+function updateDust(ms, dt) {
+  sawdustGfx.clear();
+  for (let i = S.dust.length - 1; i >= 0; i--) {
+    const p = S.dust[i];
+    p.life -= ms;
+    if (p.life <= 0) { S.dust.splice(i, 1); continue; }
+    p.vy += 0.07 * dt;           // gentle gravity
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    sawdustGfx.beginFill(p.c, Math.max(0, p.life / p.max));
+    sawdustGfx.drawCircle(p.x, p.y, p.r);
+    sawdustGfx.endFill();
+  }
+}
+
+/* ----------------------------------------------------------------------- */
+/* the one action: a cut                                                   */
+
+function tryCut() {
+  if (S.mode !== "idle") return;                 // ignore while falling/resetting
+  const now = performance.now();
+  if (now - S.lastCut < CONFIG.cooldownMs) return;
+  S.lastCut = now;
+
+  if (!S.audioStarted) { audio.startIdle(); S.audioStarted = true; }
+  S.running = true;
+
+  S.cutsMade++;
+  S.targetDepth = (S.cutsMade / S.cutsNeeded) * S.maxDepth;
+  S.kick = 1;
+  S.swingT = 0; S.swingDir *= -1;     // start a new sawing swing, alternating direction
+  audio.cut();
+  spawnDust();
+  hideHint();
+
+  if (S.cutsMade >= S.cutsNeeded) startFall();
+}
+
+function startFall() { S.mode = "falling"; S.t = 0; S.thudPlayed = false; }
+
+function resetTree() {
+  S.cutsMade = 0; S.currentDepth = 0; S.targetDepth = 0;
+  S.cutsNeeded = rndCuts(); S.retract = 0;
+  S.dust.length = 0; sawdustGfx.clear();
+  tree.rotation = 0;
+  drawNotch();
+}
+
+/* ----------------------------------------------------------------------- */
+/* main loop                                                               */
+
+app.ticker.add(() => {
+  const dt = app.ticker.deltaTime;     // ~1 at 60fps
+  const ms = app.ticker.deltaMS;
+  S.time += ms / 1000;
+  S.swingT += ms;
+
+  // moving chain
+  if (S.running) { chainTop.tilePosition.x -= 1.3 * dt; chainBot.tilePosition.x += 1.3 * dt; }
+
+  // ease the cut depth toward its target (smooth, progressive bite)
+  S.currentDepth += (S.targetDepth - S.currentDepth) * Math.min(1, ms / 110);
+  S.kick = Math.max(0, S.kick - dt * 0.05);
+
+  // mode machine
+  if (S.mode === "falling") {
+    S.t += ms;
+    const p = Math.min(1, S.t / CONFIG.fallMs);
+    tree.rotation = (p * p) * CONFIG.fallAngle;         // topple right, away from the saw
+    S.retract = Math.min(1, p * 2.4);
+    if (!S.thudPlayed && p > 0.82) { S.thudPlayed = true; audio.thud(); }
+    if (p >= 1) { S.mode = "rest"; S.t = 0; addLog(); }   // a whole felled tree = one log
+  } else if (S.mode === "rest") {
+    S.t += ms; if (S.t > CONFIG.restMs) { S.mode = "fadeOut"; S.t = 0; }
+  } else if (S.mode === "fadeOut") {
+    S.t += ms; const a = 1 - Math.min(1, S.t / CONFIG.fadeMs);
+    tree.alpha = a; saw.alpha = a; effects.alpha = a; shadow.alpha = a * 0.6 + 0.4;
+    if (a <= 0) { resetTree(); S.mode = "fadeIn"; S.t = 0; }
+  } else if (S.mode === "fadeIn") {
+    S.t += ms; const a = Math.min(1, S.t / CONFIG.fadeMs);
+    tree.alpha = a; saw.alpha = a; effects.alpha = a; shadow.alpha = a;
+    if (a >= 1) { tree.alpha = saw.alpha = effects.alpha = shadow.alpha = 1; S.mode = "idle"; }
+  }
+
+  drawNotch();
+  positionSaw(dt);
+  updateDust(ms, dt);
+});
+
+/* ----------------------------------------------------------------------- */
+/* input                                                                   */
+
+const hint = document.getElementById("hint");
+let hintGone = false;
+function hideHint() { if (!hintGone) { hintGone = true; hint.style.opacity = "0"; } }
+
+window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;                                  // one press = one cut
+  if (e.key === " " || (e.key && e.key.startsWith("Arrow"))) e.preventDefault();
+  tryCut();
+});
+app.view.addEventListener("pointerdown", (e) => { e.preventDefault(); tryCut(); });
+
+// sound toggle
+const muteBtn = document.getElementById("mute");
+let muted = false;
+muteBtn.addEventListener("click", () => {
+  muted = !muted;
+  audio.setMuted(muted);
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+});
+
+window.addEventListener("resize", layout);
+layout();
+
+/* ============================================================================
+   Want real photo textures instead of the drawn look?
+   1. Host or base64 two PNGs: one for bark, one for the chainsaw.
+   2. Replace `barkTex` with:  PIXI.Texture.from('bark.png')
+   3. Swap the `saw` Graphics for a PIXI.Sprite of your chainsaw photo,
+      keeping the same scale/position lines in positionSaw().
+   The cut logic, sound and toppling stay exactly the same.
+============================================================================ */
+</script>

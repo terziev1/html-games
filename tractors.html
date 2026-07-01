@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tractor Time!</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: none;
+      }
+
+      body {
+        font-family: "Comic Sans MS", "Chalkboard SE", cursive, sans-serif;
+        background: #d4ecd4;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: manipulation;
+      }
+
+      .prompt {
+        position: relative;
+        z-index: 10;
+        text-align: center;
+        pointer-events: none;
+      }
+
+      .prompt-tractor {
+        font-size: clamp(80px, 18vw, 140px);
+        line-height: 1;
+        display: block;
+        margin-bottom: 16px;
+      }
+
+      .prompt-text {
+        font-size: clamp(24px, 6vw, 52px);
+        color: #4a7c4a;
+        line-height: 1.3;
+        padding: 0 16px;
+      }
+
+      .tractor {
+        position: fixed;
+        z-index: 100;
+        pointer-events: none;
+        will-change: transform, opacity;
+        animation: floatUp 1.6s ease-out forwards;
+      }
+
+      .tractor img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+
+      @keyframes floatUp {
+        0% {
+          opacity: 1;
+          transform: translateY(0px);
+        }
+        70% {
+          opacity: 1;
+          transform: translateY(-100px);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-180px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="prompt" id="prompt">
+      <span class="prompt-tractor">🚜</span>
+      <div class="prompt-text">Press any key!</div>
+    </div>
+
+    <script>
+      const TRACTORS = [
+        "https://static.vecteezy.com/system/resources/thumbnails/027/182/876/small/tractor-farm-isolated-on-a-transparent-background-agricultural-tractor-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/027/182/877/small/tractor-farm-isolated-on-a-transparent-background-agricultural-tractor-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/043/561/197/small/yellow-tractor-cut-out-realistic-tractor-on-transparent-background-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/043/348/812/small/3d-tractor-isolated-on-transparent-background-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/049/223/151/small/old-blue-tractor-parked-in-a-rural-field-during-the-day-cut-out-stock-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/045/912/801/small/modern-orange-tractor-with-sophisticated-design-and-large-tires-cut-out-stock-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/037/374/326/small/tractor-isolated-on-background-3d-rendering-illustration-free-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/044/014/501/small/3d-rendering-of-a-farming-tractor-on-transparent-background-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/042/730/500/small/red-tractor-for-the-countryside-four-wheel-drive-png.png",
+        "https://static.vecteezy.com/system/resources/thumbnails/051/339/554/small/farming-tractor-isolated-on-transparent-background-png.png",
+      ];
+
+      // Preload all images
+      TRACTORS.forEach((src) => {
+        const i = new Image();
+        i.src = src;
+      });
+
+      let started = false;
+      let lastIndex = -1;
+
+      function pickTractor() {
+        let idx;
+        do {
+          idx = Math.floor(Math.random() * TRACTORS.length);
+        } while (idx === lastIndex);
+        lastIndex = idx;
+        return TRACTORS[idx];
+      }
+
+      function spawnTractor(x, y) {
+        const size = Math.random() * 150 + 140; // 140–220px
+
+        const el = document.createElement("div");
+        el.className = "tractor";
+        el.style.cssText = `
+        width: ${size}px;
+        height: ${size}px;
+        left: ${Math.max(10, Math.min(window.innerWidth - size - 10, x - size / 1.5))}px;
+        top: ${Math.max(10, Math.min(window.innerHeight - size - 10, y - size / 1.5))}px;
+      `;
+
+        const img = document.createElement("img");
+        img.src = pickTractor();
+        img.alt = "tractor";
+        el.appendChild(img);
+
+        document.body.appendChild(el);
+        el.addEventListener("animationend", () => el.remove());
+
+        if (!started) {
+          started = true;
+          const prompt = document.getElementById("prompt");
+          prompt.style.transition = "opacity 3 s";
+          prompt.style.opacity = "0";
+          setTimeout(() => prompt.remove(), 3000);
+        }
+      }
+
+      function randomSpawn() {
+        spawnTractor(Math.random() * window.innerWidth, Math.random() * window.innerHeight);
+      }
+
+      document.addEventListener("keydown", (e) => {
+        if (e.repeat) return;
+        randomSpawn();
+      });
+
+      document.addEventListener(
+        "touchstart",
+        (e) => {
+          e.preventDefault();
+          for (const touch of e.changedTouches) {
+            spawnTractor(touch.clientX, touch.clientY);
+          }
+        },
+        { passive: false },
+      );
+
+      document.addEventListener("mousedown", (e) => {
+        spawnTractor(e.clientX, e.clientY);
+      });
+    </script>
+  </body>
+</html>
